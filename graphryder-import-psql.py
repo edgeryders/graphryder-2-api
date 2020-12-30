@@ -1,6 +1,7 @@
 import psycopg2
 import json
 import os
+from sys import exit
 from neo4j import GraphDatabase
 from pprint import pprint
 
@@ -9,6 +10,9 @@ from pprint import pprint
 # must have the following properties set:
 # apoc.import.file.enabled=true
 # apoc.import.file.use_neo4j_config=false
+
+# TODO: Move the database list to a config file
+# TODO: Trigger reload from database through parameter when running the script
 
 databases = [
     {   
@@ -35,10 +39,13 @@ databases = [
         'user': 'postgres',
         'password': ''
     }]
-
-reload_from_database = False
+reload_from_database = True
 
 def get_data(db_cursor, db_name):
+    # This function gets the data we need from the Discourse psql database.
+    # It assumes that the database is built from backup dumps. 
+    # If running on the live database, 'backup' in the database names should be changed.
+    # TODO: make the database name into a variable to enable loading from backup or live db
 
     print(f'Loading new data from {db_name}')
 
@@ -94,8 +101,10 @@ def get_data(db_cursor, db_name):
             'consent': 0,
             'consent_updated': 0
         }
-    users[-3] = {
-        'id': -3,
+    
+    # Adding another system user as a dummy user for private and deleted content
+    users[-100] = {
+        'id': -100,
         'username': "Unknown",
         'email': "Unknown",
         'groups': [],
@@ -123,7 +132,7 @@ def get_data(db_cursor, db_name):
 
     groups_query = """
     SELECT 
-    id, name
+    id, name, visibility_level 
     FROM backup.groups
     """
 
@@ -134,10 +143,54 @@ def get_data(db_cursor, db_name):
         gid = group[0]
         groups[gid] = {
             'id': gid,
-            'name': group[1]
+            'name': group[1],
+            'visibility_level': group[2]
         }
 
     print(f'    Got {len(groups.keys())} groups')
+
+    # Get categories
+
+    categories_query = """
+    SELECT
+    id, name, name_lower, created_at, updated_at, read_restricted, parent_category_id
+    FROM backup.categories
+    """
+
+    categories_permissions = """
+    SELECT
+    id, category_id, group_id, permission_type
+    FROM backup.category_groups
+    """
+
+    categories = {}
+    db_cursor.execute(categories_query)
+    category_data = db_cursor.fetchall()
+    for category in category_data:
+        cid = category[0]
+        categories[cid] = {
+            'id': cid,
+            'name': category[1], 
+            'name_lower': category[2],
+            'created_at': category[3], 
+            'updated_at': category[4], 
+            'read_restricted': category[5], 
+            'parent_category_id': category[6],
+            'permissions': []
+        }
+
+    db_cursor.execute(categories_permissions)
+    category_permission_data = db_cursor.fetchall()
+    for permission in category_permission_data:
+        cid = permission[1]
+        categories[cid]['permissions'].append(
+            {
+                'group_id': permission[2],
+                'permission_type': permission[3]
+            }
+        )
+
+    print(f'    Got {len(categories.keys())} categories')
 
     # Get tags
 
@@ -167,7 +220,7 @@ def get_data(db_cursor, db_name):
 
     topics_query = """
     SELECT
-    id, title, created_at, updated_at, user_id
+    id, title, created_at, updated_at, user_id, category_id
     FROM backup.topics
     """
 
@@ -184,12 +237,12 @@ def get_data(db_cursor, db_name):
     """
 
     pm_count = 0
-    pm_set = set()
+    pm_topic_set = set()
     db_cursor.execute(allowed_users_query)
     allowed_users_data = db_cursor.fetchall()
     for permission in allowed_users_data:
         tid = permission[0]
-        pm_set.add(tid)
+        pm_topic_set.add(tid)
         pm_count += 1
 
     topics = {}
@@ -198,13 +251,17 @@ def get_data(db_cursor, db_name):
     lost_topics = set()
     for topic in topics_data:
         tid = topic[0]
+        cid = topic[5] if topic[5] in categories.keys() else None
+        read_restricted = True if tid in pm_topic_set or not cid else categories[cid]['read_restricted']
         topics[tid] = {
             'id': tid,
-            'title': 'Private message' if tid in pm_set else topic[1],
+            'title': 'Private message' if tid in pm_topic_set else topic[1],
             'created_at': topic[2],
             'updated_at': topic[3],
-            'user_id': -3 if tid in pm_set or topic[4] not in users.keys() else topic[4],
-            'is_message_thread': True if tid in pm_set else False,
+            'user_id': -100 if tid in pm_topic_set or topic[4] not in users.keys() else topic[4],
+            'is_message_thread': True if tid in pm_topic_set else False,
+            'category_id': cid,
+            'read_restricted': read_restricted,
             'allowed_users': [],
             'tags': []
         }
@@ -248,25 +305,30 @@ def get_data(db_cursor, db_name):
     """
 
     posts = {}
+    pm_post_set = set()
     private_count = 0
     db_cursor.execute(posts_query)
     posts_data = db_cursor.fetchall()
     for post in posts_data:
         pid = post[0]
-        private = True if post[2] in pm_set else False
+        tid = post[2]
+        private = True if post[2] in pm_topic_set else False
+        read_restricted = True if tid not in topics.keys() else topics[tid]['read_restricted']
         if private:
+            pm_post_set.add(pid)
             private_count += 1
         deleted = post[7]
         posts[pid] = {
             'id': pid,
-            'user_id': -3 if private or deleted or post[1] not in users.keys() else post[1],
-            'topic_id': post[2],
+            'user_id': -100 if private or deleted or post[1] not in users.keys() else post[1],
+            'topic_id': tid,
             'post_number': post[3],
             'raw': 'Removed content' if private or deleted else post[4],
             'created_at': post[5],
             'updated_at': post[6],
             'deleted_at': post[7],
             'hidden': post[8],
+            'read_restricted': read_restricted,
             'word_count': 0 if private or deleted else post[9],
             'wiki': post[10],
             'reads': 0 if private or deleted else post[11],
@@ -275,7 +337,7 @@ def get_data(db_cursor, db_name):
             'reply_count': post[14],
             'quote_count': post[15],
             'quotes_posts': [],
-            'is_reply_to': None,
+            'is_reply_to': [],
             'is_liked_by': [],
             'is_private': private
         }
@@ -295,7 +357,7 @@ def get_data(db_cursor, db_name):
     db_cursor.execute(replies_query)
     replies_data = db_cursor.fetchall()
     for num, reply in enumerate(replies_data):
-        posts[reply[1]]['is_reply_to'] = reply[0]
+        posts[reply[1]]['is_reply_to'].append(reply[0])
         replies[num] = {
             'id': num,
             'post_id': reply[0],
@@ -413,10 +475,123 @@ def get_data(db_cursor, db_name):
 
     print(f'    Got {len(list(annotations.keys()))} annotations.')
 
+    # Omit data
+    # We accept the redundancy and inefficency of looping through the data
+    # and removing records as this makes the code less complicated
+    # and makes it easier to add new rules later for how and when to omit data
+    # TODO: Move these bools to a config file
+    
+    omit_private_messages = True
+    # Omit private messages from the graph
+
+    omit_protected_content = True
+    # Omit protected content (posts, categories, groups) from the graph.
+    # Content that is not readable by all logged in users is considered protected.
+    # This also omits 'hidden' posts, also known as 'whispers'.
+    # In the future, we may want to handle 'hidden' posts separately if we 
+    # if we want to give access to the graph based on the permissions of a loggen in user.
+
+    omit_system_users = True
+    # This omits content created by system users and by deleted users.
+    # It also omits those users completely from the graph.
+
+    omit = True if omit_private_messages or omit_protected_content or omit_system_users else False
+
+    if omit:
+
+        new = dict(users)
+        for u, d in users.items():
+            if omit_system_users and d['id'] < 0:
+                del(new[u])
+                continue
+        users = new
+
+        new = dict(groups)
+        # Group visibility levels, public=0, logged_on_users=1, members=2, staff=3, owners=4
+        for g, d in groups.items():
+            if omit_protected_content and d['visibility_level'] > 1:
+                del(new[g])
+                continue
+        groups = new
+
+        new = dict(categories)
+        for c, d in categories.items():
+            if omit_protected_content and d['read_restricted']:
+                del(new[c])
+                continue
+        categories = new
+
+        new = dict(topics)
+        for t, d in topics.items():
+            if omit_private_messages and t in pm_topic_set:
+                del(new[t])
+                continue
+            if omit_protected_content and d['read_restricted']:
+                del(new[t])
+                continue
+        topics = new
+
+        new = dict(posts)
+        for p, d in posts.items():
+            if omit_private_messages and p in pm_post_set:
+                del(new[p])
+                continue
+            if omit_protected_content and (d['read_restricted'] or d['hidden']):
+                del(new[p])
+                continue
+        posts = new
+
+        new = dict(quotes)
+        for q, d in quotes.items():
+            if omit_private_messages and (d['quoted_post_id'] in pm_post_set or d['post_id'] in pm_post_set):
+                del(new[q])
+                continue
+            if omit_protected_content and (d['quoted_post_id'] in pm_post_set or d['post_id'] not in posts.keys()):
+                del(new[q])
+                continue
+        quotes = new
+        
+        new = dict(likes)
+        for l, d in likes.items():
+            if omit_private_messages and d['post_id'] in pm_post_set:
+                del(new[l])
+                continue
+            if omit_protected_content and d['post_id'] not in posts.keys():
+                del(new[l])
+                continue
+        likes = new
+
+        new = dict(annotations)
+        for a, d in annotations.items():
+            if omit_private_messages and d['post_id'] in pm_post_set:
+                del(new[a])
+                continue
+            if omit_protected_content and d['post_id'] not in posts.keys():
+                del(new[a])
+                continue
+        annotations = new
+
+        if omit_private_messages:
+            print('Omitted private messages.')
+        if omit_protected_content:
+            print('Omitted protected content.')
+        if omit_system_users:
+            print('Omitted system users and content.')
+
+    if omit_protected_content:
+        pass
+
+    if omit_system_users:
+        pass
+    
     stats = {
+        'omit_pm': omit_private_messages,
+        'omit_protected': omit_protected_content,
+        'omit_system_users': omit_system_users,
         'users': len(users.keys()),
         'groups': len(groups.keys()),
         'tags': len(tags.keys()),
+        'categories': len(categories.keys()),
         'topics': len(topics.keys()),
         'pm_threads': pm_count,
         'topics_by_deleted_users': len(lost_topics),
@@ -435,6 +610,7 @@ def get_data(db_cursor, db_name):
         'users': users,
         'groups': groups,
         'tags': tags,
+        'categories': categories,
         'topics': topics,
         'posts': posts,
         'replies': replies,
@@ -447,7 +623,21 @@ def get_data(db_cursor, db_name):
     }
 
 def reload_data(dbs):
+    # This function triggers loading data from all databases it gets as input.
+    # It outputs the data into chunked json files in the 'db' directory.
+    # This is done as the APOC calls of Neo4j work best when loading from files in chunks.
+    # Chunk size is 1000 records.
+    # TODO: Set chunk size through parameter when loading script with reload flag.
+
     print('Loading new data from databases...')
+    db_path = './db'
+    try:
+        os.mkdir(db_path)
+    except OSError:
+        print ("Database directory %s" % db_path)
+    else:
+        print ("Successfully created the directory %s " % db_path)
+
     data = {}
     for db in dbs:
 
@@ -487,6 +677,7 @@ def reload_data(dbs):
         stats = dumpSplit('users', db['name'], stats)
         stats = dumpSplit('groups', db['name'], stats)
         stats = dumpSplit('tags', db['name'], stats)
+        stats = dumpSplit('categories', db['name'], stats)
         stats = dumpSplit('topics', db['name'], stats)
         stats = dumpSplit('posts', db['name'], stats)
         stats = dumpSplit('replies', db['name'], stats)
@@ -502,6 +693,8 @@ def reload_data(dbs):
             json.dump(stats, file, default=str)
 
 def load_data(dbs):
+    # This function is basically just a verification of that the data we need is in files in the db directory. 
+
     print('')
     print('Loading JSON data files to verify...')
     print('')
@@ -525,23 +718,34 @@ def load_data(dbs):
         print(f'{len(d["users"])} users')
         print(f'{len(d["groups"])} groups')
         print(f'{len(d["tags"])} tags.')
-        print(f'{len(d["topics"])} topics, of which {d["stats"]["pm_threads"]} are PM threads, and {d["stats"]["topics_by_deleted_users"]} were by deleted users.')
+        print(f'{len(d["categories"])} tags.')
+        print(f'{len(d["topics"])} topics and {d["stats"]["pm_threads"]} PM threads.')
         print(f'{d["stats"]["tags_applied"]} tag applications to topics.')
-        print(f'{len(d["posts"])} posts, of which {d["stats"]["messages"]} are private messages.')
+        print(f'{len(d["posts"])} posts and {d["stats"]["messages"]} private messages.')
         print(f'{len(d["replies"])} posts are replies to other posts.')
         print(f'{len(d["quotes"])} quotes.')
         print(f'{len(d["likes"])} likes.')
-        print('Private message content and user identification has been omitted from the dataset.')
+        
+        if d['stats']['omit_pm']:
+            print('Private messages have been omitted.')
+        else:
+            print('Private message content and message user identification has been omitted from the dataset.')
+
+        if d['stats']['omit_protected']:
+            print('Protected content has been omitted.')
+
+        if d['stats']['omit_system_users']:
+            print('System users and their content has been omitted.')
+
         print(f'Annotation languages:{d["stats"]["annotator_languages"]}.') 
         print(f'{len(d["codes"])} ethnographic codes with {len(d["code_names"])} names.')
         print(f'{len(d["annotations"])} ethnographic annotations.')
         print(' ')
-    
+
     return data
 
 # Load data from Discourse psql databases and dump to json files
 # Data is loaded from JSON files because Neo4j APOC functions are optimized for this.
-
 dbs = databases[:]
 if reload_from_database:
     reload_data(dbs)
@@ -557,8 +761,8 @@ uri = 'bolt://localhost:7687'
 driver = GraphDatabase.driver(uri, auth=('neo4j', 'shen4yaya'))
 data_path = os.path.abspath('./db/')
 
-# Clear database function
 def graph_clear():
+    # Clear database function
 
     def tx_clear_neo4j(tx):
         tx.run('MATCH (a) DETACH DELETE a')
@@ -570,8 +774,9 @@ def graph_clear():
         except Exception as e:
             print(e)
 
-# Add platforms function
 def graph_create_platform(data):
+    # Add platforms function
+
     def tx_create_platform(tx, dataset):
         tx.run(
             f'CALL apoc.load.json("file://{data_path}/{dataset}_site.json")'
@@ -600,14 +805,14 @@ def graph_create_platform(data):
 
     print('Loaded all platforms.')
 
-# Add user groups function
 def graph_create_groups(data):
+    # Add user groups function
 
     def tx_create_groups(tx, chunk, dataset):
         tx.run(
             f'CALL apoc.load.json("file://{data_path}/{dataset}_groups_{chunk}.json") '
             f'YIELD value '
-            f'CREATE (g:group {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'MERGE (g:group {{discourse_id: value.id, platform: "{dataset}"}}) '
             f'SET g.name = value.name '
             f'WITH g, value '
             f'MATCH (p:platform {{name: "{dataset}"}}) '
@@ -641,14 +846,14 @@ def graph_create_groups(data):
 
     print('Added all groups')
 
-# Add users function
 def graph_create_users(data):
+    # Add users function
 
     def tx_create_users(tx, chunk, dataset):
         tx.run(
             f'CALL apoc.load.json("file://{data_path}/{dataset}_users_{chunk}.json") '
             f'YIELD value '
-            f'CREATE (u:user {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'MERGE (u:user {{discourse_id: value.id, platform: "{dataset}"}}) '
             f'SET u.username = value.username '
             f'SET u.email = value.email '
             f'SET u.consent = value.consent '
@@ -657,19 +862,34 @@ def graph_create_users(data):
             f'WITH u, value '
             f'MATCH (p:platform {{name: "{dataset}"}}) '
             f'WITH u, p, value '
-            f'CREATE (p)<-[:ON_PLATFORM]-(u) '
+            f'MERGE (p)<-[:ON_PLATFORM]-(u) '
             f'WITH u, value '
             f'UNWIND value.groups AS gids '
             f'MATCH (g:group {{discourse_id: gids}}) '
-            f'WITH u, g '
-            f'CREATE (u)-[:IN_GROUP]->(g)'
+            f'WITH u, g, value '
+            f'CREATE (u)-[:IN_GROUP]->(g) '
+            f'MERGE (global:globaluser {{email: value.email}}) '
+            f'SET global.username = value.username '
+            f'WITH global, u '
+            f'MERGE (u)-[:IS_GLOBAL_USER]->(global)'
+            f'WITH global '
+            f'MATCH (p:platform {{name:"{dataset}" }}) '
+            f'WITH p, global '
+            f'MERGE (p)<-[:HAS_ACCOUNT_ON]-(global)'
         )
 
     def tx_create_user_index(tx):
         tx.run(
             f'CREATE INDEX user IF NOT EXISTS '
-            f'FOR (g:user) '
-            f'ON (g.discourse_id, g.platform) '
+            f'FOR (u:user) '
+            f'ON (u.discourse_id, u.platform) '
+        )
+
+    def tx_create_globaluser_index(tx):
+        tx.run(
+            f'CREATE INDEX global IF NOT EXISTS '
+            f'FOR (g:globaluser) '
+            f'ON (g.email) '
         )
 
     for platform in data.values():
@@ -689,10 +909,14 @@ def graph_create_users(data):
         session.write_transaction(tx_create_user_index)
         print('Created user index')
 
+    with driver.session() as session:
+        session.write_transaction(tx_create_globaluser_index)
+        print('Created globaluser index')
+
     print('Added all users')
 
-# Add tags function
 def graph_create_tags(data):
+    # Add tags function
 
     def tx_create_tags(tx, chunk, dataset):
         tx.run(
@@ -735,8 +959,8 @@ def graph_create_tags(data):
 
     print('Added all tags')
 
-# Add topics
 def graph_create_topics(data):
+    # Add topics
 
     def tx_create_topics(tx, chunk, dataset):
         tx.run(
@@ -764,8 +988,8 @@ def graph_create_topics(data):
     def tx_create_topic_index(tx):
         tx.run(
             f'CREATE INDEX topic IF NOT EXISTS '
-            f'FOR (g:topic) '
-            f'ON (g.discourse_id, g.platform) '
+            f'FOR (t:topic) '
+            f'ON (t.discourse_id, t.platform) '
         )
 
     for platform in data.values():
@@ -787,8 +1011,8 @@ def graph_create_topics(data):
 
     print('Added all topics')
 
-# Add posts
 def graph_create_posts(data):
+    # Add posts
 
     def tx_create_posts(tx, chunk, dataset):
         tx.run(
@@ -812,21 +1036,14 @@ def graph_create_posts(data):
             f'SET p.quote_count = value.quote_count '
             f'WITH p, value '
             f'MATCH (platform:platform {{name: "{dataset}"}}) '
-            f'CREATE (platform)<-[:ON_PLATFORM]-(p) '
+            f'MERGE (platform)<-[:ON_PLATFORM]-(p) '
             f'WITH p, value '
             f'MATCH (u:user {{discourse_id: value.user_id, platform: "{dataset}"}}) '
-            f'CREATE (p)<-[:CREATED]-(u) '
+            f'MERGE (p)<-[:CREATED]-(u) '
             f'WITH p, value '
-            f'MATCH (t:topic {{discourse_id: value.topic_id, platform: "{dataset}"}}) '
-            f'CREATE (t)<-[:IN_TOPIC]-(p) '
-            f'WITH p, value '
-            f'MATCH (p2:post {{discourse_id: value.is_reply_to, platform: "{dataset}"}})'
-            f'CALL apoc.do.when(value.is_reply_to IS NOT NULL, '
-            f'"MERGE (p)-[r:IS_REPLY_TO]->(p2) RETURN p2",'
-            f'"",'
-            f'{{p:p, p2:p2}})'
-            f'YIELD value AS value2 '
-            f'RETURN value2 '
+            f'MATCH (t:topic {{platform: "{dataset}", discourse_id: value.topic_id}}) '
+            f'WITH p, t '
+            f'MERGE (t)<-[r:IN_TOPIC]-(p)'
         )
 
     def tx_create_post_index(tx):
@@ -850,13 +1067,42 @@ def graph_create_posts(data):
                     print(e)
 
     with driver.session() as session:
-        session.write_transaction(tx_create_post_index)
-        print('Created post index')
+        try:
+            session.write_transaction(tx_create_post_index)
+            print('Created post index')
+        except Exception as e:
+            print(f'Creating post index failed on {platform_name}')
+            print(e)
 
     print('Added all posts')
 
-# Add quotes
+def graph_create_replies(data):
+    # Add replies
+    
+    def tx_create_replies(tx, chunk, dataset):
+        tx.run(
+            f'CALL apoc.load.json("file://{data_path}/{dataset}_replies_{chunk}.json") '
+            f'YIELD value '
+            f'MATCH (p1:post {{discourse_id: value.reply_post_id, platform: "{dataset}"}}) '
+            f'MATCH (p2:post {{discourse_id: value.post_id, platform: "{dataset}"}}) '
+            f'CREATE (p2)<-[r:IS_REPLY_TO]-(p1) '
+        )
+    
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            topic = 'replies'
+            chunks = platform['stats']['chunk_sizes'][topic]
+            for chunk in range(1, chunks + 1):
+                try:
+                    session.write_transaction(tx_create_replies, chunk, platform_name)
+                    print(f'Loaded reply data from {platform_name}, chunk #{chunk}')
+                except Exception as e:
+                    print(f'Import failed for replies on {platform_name}, chunk #{chunk}')
+                    print(e)
+
 def graph_create_quotes(data):
+    # Add quotes
     
     def tx_create_quotes(tx, chunk, dataset):
         tx.run(
@@ -880,8 +1126,97 @@ def graph_create_quotes(data):
                     print(f'Import quote for reply on {platform_name}, chunk #{chunk}')
                     print(e)
 
-# Add likes
+def graph_create_interactions():
+    # Add interactions
+
+    def tx_create_user_talks(tx):
+        tx.run(
+            f'MATCH (g1:globaluser)<-[:IS_GLOBAL_USER]-()-[:CREATED]->()-[r:IS_REPLY_TO]-()<-[:CREATED]-()-[:IS_GLOBAL_USER]->(g2:globaluser) '
+            f'WITH g1, g2, count(r) AS c '
+            f'MERGE (g1)-[gr:TALKED_TO]-(g2) '
+            f'SET gr.count = c '
+        )
+
+    def tx_create_global_user_talks(tx):
+        tx.run(
+            f'MATCH (u1:user)-[:CREATED]->()-[r:IS_REPLY_TO]-()<-[:CREATED]-(u2:user) '
+            f'WITH u1, u2, count(r) AS c '
+            f'MERGE (u1)-[ur:TALKED_TO]-(u2) '
+            f'SET ur.count = c '
+        )
+
+    def tx_create_user_quotes(tx):
+        tx.run(
+            f'MATCH (g1:globaluser)<-[:IS_GLOBAL_USER]-()-[:CREATED]->()-[r:CONTAINS_QUOTE_FROM]->()<-[:CREATED]-()-[:IS_GLOBAL_USER]->(g2:globaluser) '
+            f'WITH g1, g2, count(r) AS c '
+            f'MERGE (g1)-[gr:QUOTED]->(g2) '
+            f'SET gr.count = c '
+        )
+
+    def tx_create_global_user_quotes(tx):
+        tx.run(
+            f'MATCH (u1:user)-[:CREATED]->()-[r:CONTAINS_QUOTE_FROM]->()<-[:CREATED]-(u2:user) '
+            f'WITH u1, u2, count(r) AS c '
+            f'MERGE (u1)-[ur:QUOTED]->(u2) '
+            f'SET ur.count = c '
+        )
+
+    def tx_create_user_talks_and_quotes(tx):
+        tx.run(
+            f'MATCH (g1:globaluser)<-[:IS_GLOBAL_USER]-()-[:CREATED]->()-[r:IS_REPLY_TO|CONTAINS_QUOTE_FROM]-()<-[:CREATED]-()-[:IS_GLOBAL_USER]->(g2:globaluser) '
+            f'WITH g1, g2, count(r) AS c '
+            f'MERGE (g1)-[gr:TALKED_OR_QUOTED]-(g2) '
+            f'SET gr.count = c '
+        )
+
+    def tx_create_global_user_talks_and_quotes(tx):
+        tx.run(
+            f'MATCH (u1:user)-[:CREATED]->()-[r:IS_REPLY_TO|CONTAINS_QUOTE_FROM]-()<-[:CREATED]-(u2:user) '
+            f'WITH u1, u2, count(r) AS c '
+            f'MERGE (u1)-[ur:TALKED_OR_QUOTED]-(u2) '
+            f'SET ur.count = c '
+        )
+
+    with driver.session() as session:
+        try:
+            session.write_transaction(tx_create_user_talks)
+            print('Created user talk graph')
+        except Exception as e:
+            print('Creating user talk graph failed.')
+            print(e)
+        try:
+            session.write_transaction(tx_create_global_user_talks)
+            print('Created global user talk graph')
+        except Exception as e:
+            print('Creating global user talk graph failed.')
+            print(e)
+        try:
+            session.write_transaction(tx_create_user_quotes)
+            print('Created user quote graph')
+        except Exception as e:
+            print('Creating user quote graph failed.')
+            print(e)
+        try:
+            session.write_transaction(tx_create_global_user_quotes)
+            print('Created global user quote graph')
+        except Exception as e:
+            print('Creating global user quote graph failed.')
+            print(e)
+        try:
+            session.write_transaction(tx_create_user_talks_and_quotes)
+            print('Created user talk and quote graph')
+        except Exception as e:
+            print('Creating user talk and quote graph failed.')
+            print(e)
+        try:
+            session.write_transaction(tx_create_global_user_talks_and_quotes)
+            print('Created global user talk and quote graph')
+        except Exception as e:
+            print('Creating global user talk and quote graph failed.')
+            print(e)
+
 def graph_create_likes(data):
+    # Add likes
 
     def tx_create_likes(tx, chunk, dataset):
         tx.run(
@@ -905,23 +1240,27 @@ def graph_create_likes(data):
                     print(f'Import likes for reply on {platform_name}, chunk #{chunk}')
                     print(e)
 
-# Update graph
-# graph_clear()
-# graph_create_platform(data)
-# graph_create_groups(data)
-# graph_create_users(data)
-# graph_create_tags(data)
-# graph_create_topics(data)
-# graph_create_posts(data)
-# graph_create_quotes(data)
+# Calls to update graph 
+graph_clear()
+graph_create_platform(data)
+graph_create_groups(data)
+graph_create_users(data)
+graph_create_tags(data)
+graph_create_topics(data)
+graph_create_posts(data)
+graph_create_replies(data)
+graph_create_quotes(data)
+graph_create_interactions()
 graph_create_likes(data)
 
 # TODO
-# Add post permissions with HAS_ACCESS to groups
-# Potentially scrub content and titles from non-public topics and posts
+# Add categories to graph
 # Add annotation languages for platform
 # Add codes and local code names linked to languages
 # Add code ancestry
 # Add code creator relation
 # Add annotations, code relation (to local name id), annotator id
 # Add cross-platform identity node for users
+
+# TODO FUTURE
+# Add post permissions with HAS_ACCESS to groups to enable granular graph access
