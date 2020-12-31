@@ -1,4 +1,5 @@
 import psycopg2
+import time
 import json
 import os
 from sys import exit
@@ -39,7 +40,11 @@ databases = [
         'user': 'postgres',
         'password': ''
     }]
+
 reload_from_database = True
+
+start_time = time.time()
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
 def get_data(db_cursor, db_name):
     # This function gets the data we need from the Discourse psql database.
@@ -128,7 +133,6 @@ def get_data(db_cursor, db_name):
     print(f'    Got {len(users.keys())} users')
 
     # Get groups
-    # Group 0 is 'everyone' and permission_type is an integer 1 = Full 2 = Create Post 3 = Read Only 
 
     groups_query = """
     SELECT 
@@ -179,16 +183,12 @@ def get_data(db_cursor, db_name):
             'permissions': []
         }
 
+    # Group 0 is 'everyone' and permission_type is an integer 1 = Full 2 = Reply and read 3 = Read Only
     db_cursor.execute(categories_permissions)
     category_permission_data = db_cursor.fetchall()
     for permission in category_permission_data:
         cid = permission[1]
-        categories[cid]['permissions'].append(
-            {
-                'group_id': permission[2],
-                'permission_type': permission[3]
-            }
-        )
+        categories[cid]['permissions'].append(permission[2])
 
     print(f'    Got {len(categories.keys())} categories')
 
@@ -424,7 +424,7 @@ def get_data(db_cursor, db_name):
         cid = code[0]
         annotator_codes[cid] = {
             'id': cid,
-            'decription': code[1],
+            'description': code[1],
             'creator_id': code[2],
             'created_at': code[3],
             'updated_at': code[4],
@@ -519,6 +519,9 @@ def get_data(db_cursor, db_name):
             if omit_protected_content and d['read_restricted']:
                 del(new[c])
                 continue
+            for group in d['permissions']:
+                if group not in groups.keys():
+                    new[c]['permissions'].remove(group)
         categories = new
 
         new = dict(topics)
@@ -599,9 +602,9 @@ def get_data(db_cursor, db_name):
         'posts': len(posts.keys()),
         'messages': private_count,
         'annotator_languages': language_list[:-1],
-        'ethno-codes': len(list(annotator_codes.keys())),
-        'ethno-code-names': len(list(annotator_code_names.keys())),
-        'ethno-annotations': len(list(annotations.keys()))
+        'annotator-codes': len(list(annotator_codes.keys())),
+        'annotator-code-names': len(list(annotator_code_names.keys())),
+        'annotator-annotations': len(list(annotations.keys()))
     }
 
     return {
@@ -694,6 +697,7 @@ def reload_data(dbs):
 
 def load_data(dbs):
     # This function is basically just a verification of that the data we need is in files in the db directory. 
+    # TODO: Actually test data integrity before import?
 
     print('')
     print('Loading JSON data files to verify...')
@@ -750,13 +754,17 @@ dbs = databases[:]
 if reload_from_database:
     reload_data(dbs)
 data = load_data(dbs)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
 # Build Neo4j database
+
+# TODO: Refactor 'for platform in data.values()' loop into function
+# TODO: Refactor create index into function
 
 print(' ')
 print('Building Neo4j database...')
 print(' ')
-
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 uri = 'bolt://localhost:7687'
 driver = GraphDatabase.driver(uri, auth=('neo4j', 'shen4yaya'))
 data_path = os.path.abspath('./db/')
@@ -791,6 +799,9 @@ def graph_create_platform(data):
             f'ON (p.name) '
         )
 
+    with driver.session() as session:
+        session.write_transaction(tx_create_platform_index)
+
     for platform in data.values():
         with driver.session() as session:
             try:
@@ -799,9 +810,6 @@ def graph_create_platform(data):
             except Exception as e:
                 print(f'Import failed for platform data on {platform["site"]["name"]}')
                 print(e)
-
-    with driver.session() as session:
-        session.write_transaction(tx_create_platform_index)
 
     print('Loaded all platforms.')
 
@@ -827,6 +835,10 @@ def graph_create_groups(data):
             f'ON (g.discourse_id, g.platform) '
         )
 
+    with driver.session() as session:
+        session.write_transaction(tx_create_group_index)
+        print('Created group index')
+
     for platform in data.values():
         with driver.session() as session:
             platform_name = platform['site']['name']
@@ -839,10 +851,6 @@ def graph_create_groups(data):
                 except Exception as e:
                     print(f'Import failed for groups on {platform_name}, chunk #{chunk}')
                     print(e)
-
-    with driver.session() as session:
-        session.write_transaction(tx_create_group_index)
-        print('Created group index')
 
     print('Added all groups')
 
@@ -865,7 +873,7 @@ def graph_create_users(data):
             f'MERGE (p)<-[:ON_PLATFORM]-(u) '
             f'WITH u, value '
             f'UNWIND value.groups AS gids '
-            f'MATCH (g:group {{discourse_id: gids}}) '
+            f'MATCH (g:group {{discourse_id: gids, platform: "{dataset}"}}) '
             f'WITH u, g, value '
             f'CREATE (u)-[:IN_GROUP]->(g) '
             f'MERGE (global:globaluser {{email: value.email}}) '
@@ -892,6 +900,14 @@ def graph_create_users(data):
             f'ON (g.email) '
         )
 
+    with driver.session() as session:
+        session.write_transaction(tx_create_user_index)
+        print('Created user index')
+
+    with driver.session() as session:
+        session.write_transaction(tx_create_globaluser_index)
+        print('Created globaluser index')
+
     for platform in data.values():
         with driver.session() as session:
             platform_name = platform['site']['name']
@@ -904,14 +920,6 @@ def graph_create_users(data):
                 except Exception as e:
                     print(f'Import failed for users on {platform_name}, chunk #{chunk}')
                     print(e)
-
-    with driver.session() as session:
-        session.write_transaction(tx_create_user_index)
-        print('Created user index')
-
-    with driver.session() as session:
-        session.write_transaction(tx_create_globaluser_index)
-        print('Created globaluser index')
 
     print('Added all users')
 
@@ -936,9 +944,13 @@ def graph_create_tags(data):
     def tx_create_tag_index(tx):
         tx.run(
             f'CREATE INDEX tag IF NOT EXISTS '
-            f'FOR (g:tag) '
-            f'ON (g.discourse_id, g.platform) '
+            f'FOR (t:tag) '
+            f'ON (t.discourse_id, t.platform) '
         )
+
+    with driver.session() as session:
+        session.write_transaction(tx_create_tag_index)
+        print('Created tag index')
 
     for platform in data.values():
         with driver.session() as session:
@@ -953,11 +965,64 @@ def graph_create_tags(data):
                     print(f'Import failed for tag on {platform_name}, chunk #{chunk}')
                     print(e)
 
-    with driver.session() as session:
-        session.write_transaction(tx_create_tag_index)
-        print('Created tag index')
-
     print('Added all tags')
+
+def graph_create_categories(data):
+    # Add categories
+
+    def tx_create_categories(tx, chunk, dataset):
+        tx.run(
+            f'CALL apoc.load.json("file://{data_path}/{dataset}_categories_{chunk}.json") '
+            f'YIELD value '
+            f'MERGE (c:category {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'SET c.name = value.name '
+            f'SET c.name_lower = value.name_lower '
+            f'SET c.created_at = value.created_at '
+            f'SET c.updated_at = value.updated_at '
+            f'SET c.read_restricted = value.read_restricted '
+            f'SET c.parent_category_id = value.parent_category_id '
+            f'SET c.permissions = value.permissions '
+            f'WITH c, value '
+            f'MATCH (p:platform {{name: "{dataset}"}}) '
+            f'CREATE (p)<-[:ON_PLATFORM]-(c) '
+            f'WITH c, value '
+            f'UNWIND value.permissions AS permissions '
+            f'MATCH (g:group {{discourse_id: permissions, platform: "{dataset}"}}) '
+            f'MERGE (g)-[:HAS_ACCESS]->(c) '
+            f'WITH c, value '
+            f'CALL apoc.do.when(value.parent_category_id IS NOT NULL,'
+            f'"MERGE (c)<-[:PARENT_CATEGORY_OF]-(ca:category {{discourse_id: value.parent_category_id, platform: dataset}})",'
+            f'"",'
+            f'{{c:c, value:value, dataset: c.platform}}) '
+            f'YIELD value AS value2 '
+            f'RETURN value2 '
+        )
+
+    def tx_create_category_index(tx):
+        tx.run(
+            f'CREATE INDEX categories IF NOT EXISTS '
+            f'FOR (g:category) '
+            f'ON (g.discourse_id, g.platform) '
+        )
+
+    with driver.session() as session:
+        session.write_transaction(tx_create_category_index)
+        print('Created category index')
+
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            topic = 'categories'
+            chunks = platform['stats']['chunk_sizes'][topic]
+            for chunk in range(1, chunks + 1):
+                try:
+                    session.write_transaction(tx_create_categories, chunk, platform_name)
+                    print(f'Loaded category data from {platform_name}, chunk #{chunk}')
+                except Exception as e:
+                    print(f'Import failed for categories on {platform_name}, chunk #{chunk}')
+                    print(e)
+
+    print('Added all categories')
 
 def graph_create_topics(data):
     # Add topics
@@ -973,16 +1038,20 @@ def graph_create_topics(data):
             f'SET t.user_id = value.user_id '
             f'SET t.is_message_thread = value.is_message_thread '
             f'SET t.tags = value.tags '
+            f'SET t.category_id = value.category_id '
             f'WITH t, value '
             f'MATCH (p:platform {{name: "{dataset}"}}) '
             f'CREATE (p)<-[:ON_PLATFORM]-(t) '
+            f'WITH t, value '
+            f'MATCH (c:category {{discourse_id: value.category_id, platform: "{dataset}"}}) '
+            f'CREATE (c)<-[:IN_CATEGORY]-(t) '
             f'WITH t, value '
             f'MATCH (u:user {{discourse_id: value.user_id, platform: "{dataset}"}}) '
             f'CREATE (t)<-[:CREATED]-(u) '
             f'WITH t, value '
             f'UNWIND value.tags AS tagids '
-            f'MATCH (tag:tag {{discourse_id: tagids}}) '
-            f'CREATE (t)<-[:TAGGED_WITH]-(tag) '
+            f'MATCH (tag:tag {{discourse_id: tagids, platform: "{dataset}"}}) '
+            f'CREATE (t)-[:TAGGED_WITH]->(tag) '
         )
 
     def tx_create_topic_index(tx):
@@ -991,6 +1060,10 @@ def graph_create_topics(data):
             f'FOR (t:topic) '
             f'ON (t.discourse_id, t.platform) '
         )
+
+    with driver.session() as session:
+        session.write_transaction(tx_create_topic_index)
+        print('Created topic index')
 
     for platform in data.values():
         with driver.session() as session:
@@ -1005,10 +1078,6 @@ def graph_create_topics(data):
                     print(f'Import failed for topic on {platform_name}, chunk #{chunk}')
                     print(e)
 
-    with driver.session() as session:
-        session.write_transaction(tx_create_topic_index)
-        print('Created topic index')
-
     print('Added all topics')
 
 def graph_create_posts(data):
@@ -1018,7 +1087,7 @@ def graph_create_posts(data):
         tx.run(
             f'CALL apoc.load.json("file://{data_path}/{dataset}_posts_{chunk}.json") '
             f'YIELD value '
-            f'MERGE (p:post {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'CREATE (p:post {{discourse_id: value.id, platform: "{dataset}"}}) '
             f'SET p.user_id = value.user_id '
             f'SET p.topic_id = value.topic_id '
             f'SET p.post_number = value.post_number '
@@ -1053,6 +1122,14 @@ def graph_create_posts(data):
             f'ON (g.discourse_id, g.platform) '
         )
 
+    with driver.session() as session:
+        try:
+            session.write_transaction(tx_create_post_index)
+            print('Created post index')
+        except Exception as e:
+            print(f'Creating post index failed on {platform_name}')
+            print(e)
+
     for platform in data.values():
         with driver.session() as session:
             platform_name = platform['site']['name']
@@ -1065,14 +1142,6 @@ def graph_create_posts(data):
                 except Exception as e:
                     print(f'Import failed for posts on {platform_name}, chunk #{chunk}')
                     print(e)
-
-    with driver.session() as session:
-        try:
-            session.write_transaction(tx_create_post_index)
-            print('Created post index')
-        except Exception as e:
-            print(f'Creating post index failed on {platform_name}')
-            print(e)
 
     print('Added all posts')
 
@@ -1101,6 +1170,8 @@ def graph_create_replies(data):
                     print(f'Import failed for replies on {platform_name}, chunk #{chunk}')
                     print(e)
 
+    print('Added all reply links')
+
 def graph_create_quotes(data):
     # Add quotes
     
@@ -1125,6 +1196,8 @@ def graph_create_quotes(data):
                 except Exception as e:
                     print(f'Import quote for reply on {platform_name}, chunk #{chunk}')
                     print(e)
+
+    print('Added all quote links')
 
 def graph_create_interactions():
     # Add interactions
@@ -1215,6 +1288,8 @@ def graph_create_interactions():
             print('Creating global user talk and quote graph failed.')
             print(e)
 
+    print('Added all user to user interaction links')
+
 def graph_create_likes(data):
     # Add likes
 
@@ -1240,27 +1315,258 @@ def graph_create_likes(data):
                     print(f'Import likes for reply on {platform_name}, chunk #{chunk}')
                     print(e)
 
+    print('Added all like links')
+
+def graph_create_languages(data):
+    # Add annotation languages
+
+    def tx_create_create_languages(tx, chunk, dataset):
+        tx.run(
+            f'CALL apoc.load.json("file://{data_path}/{dataset}_languages_{chunk}.json") '
+            f'YIELD value '
+            f'CREATE (lang:language {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'SET lang.name = value.name '
+            f'SET lang.locale = value.locale '
+            f'WITH lang, value '
+            f'MATCH (p:platform {{name: "{dataset}"}}) '
+            f'WITH lang, p, value '
+            f'MERGE (p)<-[:ON_PLATFORM]-(lang) '
+        )
+
+    def tx_create_language_index(tx):
+        tx.run(
+            f'CREATE INDEX languages IF NOT EXISTS '
+            f'FOR (lang:language) '
+            f'ON (lang.discourse_id, lang.platform) '
+        )
+
+    with driver.session() as session:
+        session.write_transaction(tx_create_language_index)
+        print('Created language index')
+
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            topic = 'languages'
+            chunks = platform['stats']['chunk_sizes'][topic]
+            for chunk in range(1, chunks + 1):
+                try:
+                    session.write_transaction(tx_create_create_languages, chunk, platform_name)
+                    print(f'Loaded language data from {platform_name}, chunk #{chunk}')
+                except Exception as e:
+                    print(f'Import for language on {platform_name}, chunk #{chunk}')
+                    print(e)
+
+def graph_create_codes(data):
+    # Add annotation codes
+
+    def tx_create_codes(tx, chunk, dataset):
+        tx.run(
+            f'CALL apoc.load.json("file://{data_path}/{dataset}_codes_{chunk}.json") '
+            f'YIELD value '
+            f'CREATE (code:code {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'SET code.name = value.name '
+            f'SET code.description = value.description '
+            f'SET code.creator_id = value.creator_id '
+            f'SET code.created_at = value.created_at '
+            f'SET code.updated_at = value.updated_at '
+            f'SET code.ancestry = value.ancestry '
+            f'SET code.annotations_count = value.annotations_count '
+            f'WITH code, value '
+            f'MATCH (p:platform {{name: "{dataset}"}}) '
+            f'WITH code, p, value '
+            f'CREATE (p)<-[:ON_PLATFORM]-(code) '
+            f'WITH code, value '
+            f'MATCH (u:user {{discourse_id: value.creator_id, platform: "{dataset}"}}) '
+            f'CREATE (u)-[:CREATED]->(code)'
+        )
+
+    def tx_create_code_index(tx):
+        tx.run(
+            f'CREATE INDEX codes IF NOT EXISTS '
+            f'FOR (code:code) '
+            f'ON (code.discourse_id, code.platform) '
+        )
+
+    with driver.session() as session:
+        session.write_transaction(tx_create_code_index)
+        print('Created code index')
+
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            topic = 'codes'
+            chunks = platform['stats']['chunk_sizes'][topic]
+            for chunk in range(1, chunks + 1):
+                try:
+                    session.write_transaction(tx_create_codes, chunk, platform_name)
+                    print(f'Loaded code data from {platform_name}, chunk #{chunk}')
+                except Exception as e:
+                    print(f'Import for codes on {platform_name}, chunk #{chunk}')
+                    print(e)
+
+def graph_create_code_names(data):
+    # Add annotation code names
+
+    def tx_create_code_names(tx, chunk, dataset):
+        tx.run(
+            f'CALL apoc.load.json("file://{data_path}/{dataset}_code_names_{chunk}.json") '
+            f'YIELD value '
+            f'CREATE (codename:codename {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'SET codename.name = value.name '
+            f'SET codename.code_id = value.tag_id '
+            f'SET codename.language_id = value.language_id '
+            f'SET codename.created_at = value.created_at '
+            f'WITH codename, value '
+            f'MATCH (language:language {{discourse_id: value.language_id, platform: "{dataset}"}}) '
+            f'MATCH (code:code {{discourse_id: value.tag_id, platform: "{dataset}"}}) '
+            f'WITH codename, language, code '
+            f'CREATE (codename)<-[:HAS_CODENAME]-(code) '
+            f'CREATE (codename)-[:IN_LANGUAGE]->(language) '
+        )
+
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            topic = 'code_names'
+            chunks = platform['stats']['chunk_sizes'][topic]
+            for chunk in range(1, chunks + 1):
+                try:
+                    session.write_transaction(tx_create_code_names, chunk, platform_name)
+                    print(f'Loaded code name data from {platform_name}, chunk #{chunk}')
+                except Exception as e:
+                    print(f'Import for code name on {platform_name}, chunk #{chunk}')
+                    print(e)
+
+def graph_create_annotations(data):
+    # Add annotations
+
+    def tx_create_annotations(tx, chunk, dataset):
+        tx.run(
+            f'CALL apoc.load.json("file://{data_path}/{dataset}_annotations_{chunk}.json") '
+            f'YIELD value '
+            f'CREATE (annotation:annotation {{discourse_id: value.id, platform: "{dataset}"}}) '
+            f'SET annotation.text = value.text '
+            f'SET annotation.quote = value.quote '
+            f'SET annotation.created_at = value.created_at '
+            f'SET annotation.updated_at = value.updated_at '
+            f'SET annotation.code_id = value.tag_id '
+            f'SET annotation.post_id = value.post_id '
+            f'SET annotation.creator_id = value.creator_id '
+            f'SET annotation.type = value.type '
+            f'SET annotation.topic_id = value.topic_id '
+            f'WITH annotation, value '
+            f'MATCH (code:code {{discourse_id: value.tag_id, platform: "{dataset}"}}) '
+            f'MATCH (post:post {{discourse_id: value.post_id, platform: "{dataset}"}}) '
+            f'MATCH (user:user {{discourse_id: value.creator_id, platform: "{dataset}"}}) '
+            f'WITH code, post, user, annotation '
+            f'CREATE (code)<-[:REFERS_TO]-(annotation) '
+            f'CREATE (post)<-[:ANNOTATES]-(annotation) '
+            f'CREATE (user)-[:CREATED]->(annotation) '
+        )
+
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            topic = 'annotations'
+            chunks = platform['stats']['chunk_sizes'][topic]
+            for chunk in range(1, chunks + 1):
+                try:
+                    session.write_transaction(tx_create_annotations, chunk, platform_name)
+                    print(f'Loaded annotations data from {platform_name}, chunk #{chunk}')
+                except Exception as e:
+                    print(f'Import failed for annotations on {platform_name}, chunk #{chunk}')
+                    print(e)
+
+def graph_create_corpus():
+    # Define ethno-tags as corpus identifiers
+
+    def tx_create_corpus(tx):
+        tx.run(
+            f'MATCH (t:tag) WHERE t.name STARTS WITH "ethno-" '
+            f'SET t:corpus '
+            f'WITH t '
+            f'MATCH (t)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code:code) '
+            f'WITH code, t '
+            f'MERGE (code)-[:IN_CORPUS]->(t)'
+        )
+
+    with driver.session() as session:
+        try:
+            session.write_transaction(tx_create_corpus)
+            print('Added corpus labels to graph')
+        except Exception as e:
+            print('Adding corpus labels to graph failed.')
+            print(e)
+
+def graph_create_code_cooccurrences():
+    # Create code cooccurance network between codes
+
+    def tx_create_code_cooccurrences(tx):
+        tx.run(
+            f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code1:code)-[:HAS_CODENAME]->(cn1:codename)-[:IN_LANGUAGE]->(l:language {{locale: "en"}}) '
+            f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code2:code)-[:HAS_CODENAME]->(cn2:codename)-[:IN_LANGUAGE]->(l:language {{locale: "en"}}) WHERE NOT ID(code1) = ID(code2) '
+            f'WITH code1, code2, cn1, cn2, corpus, count(DISTINCT p) AS cooccurs '
+            f'MERGE (code1)-[r:COOCCURS {{count: cooccurs, corpus: corpus.name}}]-(code2) '
+            f'RETURN corpus.name, cn1.name, cn2.name, r.count ORDER BY r.count DESCENDING '
+        )
+
+    with driver.session() as session:
+        try:
+            session.write_transaction(tx_create_code_cooccurrences)
+            print('Created cooccurance graph')
+        except Exception as e:
+            print('Creating cooccurance graph failed.')
+            print(e)
+
+
+def graph_create_creator_code_cooccurrences():
+    pass
+
 # Calls to update graph 
 graph_clear()
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_platform(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_groups(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_users(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_tags(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_categories(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_topics(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_posts(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_replies(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_quotes(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_interactions()
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_likes(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_languages(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_codes(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_code_names(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_annotations(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_corpus()
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_code_cooccurrences()
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
 # TODO
-# Add categories to graph
-# Add annotation languages for platform
-# Add codes and local code names linked to languages
+# Add english code name to code node
+# Decide how to define corpus (maybe add property for each corpus and then count?)
 # Add code ancestry
-# Add code creator relation
 # Add annotations, code relation (to local name id), annotator id
-# Add cross-platform identity node for users
+# Add code-co-occurance per ethno corpus 
 
 # TODO FUTURE
 # Add post permissions with HAS_ACCESS to groups to enable granular graph access

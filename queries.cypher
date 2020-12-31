@@ -36,3 +36,16 @@ MATCH (u1:user)-[r:LIKES]->()<-[:CREATED]-(u2:user)
 WITH u1, u2, count(r) AS c
 MERGE (u1)-[ur:LIKES]->(u2) 
 SET ur.count = c
+
+// Create cooccurance graph
+MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code1:code)-[:HAS_CODENAME]->(cn1:codename)-[:IN_LANGUAGE]->(l:language {locale: 'en'})
+MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code2:code)-[:HAS_CODENAME]->(cn2:codename)-[:IN_LANGUAGE]->(l:language {locale: 'en'}) WHERE NOT ID(code1) = ID(code2) 
+WITH code1, code2, cn1, cn2, corpus, count(DISTINCT p) AS cooccurs
+MERGE (code1)-[r:COOCCURS {count: cooccurs}]-(code2)
+RETURN corpus.name, cn1.name, cn2.name, r.count ORDER BY r.count DESCENDING
+
+f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code1:code)-[:HAS_CODENAME]->(cn1:codename)-[:IN_LANGUAGE]->(l:language {{locale: 'en'}}) '
+f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code2:code)-[:HAS_CODENAME]->(cn2:codename)-[:IN_LANGUAGE]->(l:language {{locale: 'en'}}) WHERE NOT ID(code1) = ID(code2) '
+f'WITH code1, code2, cn1, cn2, corpus, count(DISTINCT p) AS cooccurs '
+f'MERGE (code1)-[r:COOCCURS {{count: cooccurs}}]-(code2) '
+f'RETURN corpus.name, cn1.name, cn2.name, r.count ORDER BY r.count DESCENDING '
