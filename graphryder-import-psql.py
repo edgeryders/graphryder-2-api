@@ -15,38 +15,16 @@ from pprint import pprint
 # TODO: Move the database list to a config file
 # TODO: Trigger reload from database through parameter when running the script
 
-databases = [
-    {   
-        'name': 'edgeryders',
-        'host': 'localhost',
-        'port': '5432',
-        'dbname': 'erbackup',
-        'user': 'postgres',
-        'password': ''
-    },
-    {
-        'name': 'bbu',
-        'host': 'localhost',
-        'port': '5432',
-        'dbname': 'bbubackup',
-        'user': 'postgres',
-        'password': ''
-    },
-    {
-        'name': 'blivande',
-        'host': 'localhost',
-        'port': '5432',
-        'dbname': 'blivandebackup',
-        'user': 'postgres',
-        'password': ''
-    }]
+with open("config.json") as json_config:
+    config = json.load(json_config)
 
-reload_from_database = False
+databases = config['databases']
+reload_from_database = config['reload_from_database']
 
 start_time = time.time()
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
-def get_data(db_cursor, db_name):
+def get_data(db_cursor, db_name, db_root):
     # This function gets the data we need from the Discourse psql database.
     # It assumes that the database is built from backup dumps. 
     # If running on the live database, 'backup' in the database names should be changed.
@@ -56,13 +34,14 @@ def get_data(db_cursor, db_name):
 
     # Get site data
 
-    site_query = """
-    SELECT
-    value
-    FROM backup.site_settings
-    WHERE name = 'vapid_base_url'
-    LIMIT 1
-    """
+    site_query = f'''
+    SELECT 
+    value 
+    FROM {db_root}.site_settings 
+    WHERE name = 'vapid_base_url' 
+    LIMIT 1 
+    '''
+
     db_cursor.execute(site_query)
     site_data = db_cursor.fetchall()
     site = {
@@ -73,25 +52,25 @@ def get_data(db_cursor, db_name):
 
     # Get users, consent, group memberships
 
-    users_query = """
+    users_query = f'''
     SELECT
     users.id, username_lower, email
-    FROM backup.users AS users, backup.user_emails as emails
+    FROM {db_root}.users AS users, {db_root}.user_emails as emails
     WHERE users.id = emails.user_id;
-    """
+    '''
 
-    consent_query = """
+    consent_query = f'''
     SELECT 
     user_id, value, updated_at 
-    FROM backup.user_custom_fields 
+    FROM {db_root}.user_custom_fields 
     WHERE name = 'edgeryders_consent';
-    """
+    '''
 
-    group_members_query = """
+    group_members_query = f'''
     SELECT
     group_id, user_id
-    FROM backup.group_users
-    """
+    FROM {db_root}.group_users
+    '''
 
     users = {}
     db_cursor.execute(users_query)
@@ -134,11 +113,11 @@ def get_data(db_cursor, db_name):
 
     # Get groups
 
-    groups_query = """
+    groups_query = f'''
     SELECT 
     id, name, visibility_level 
-    FROM backup.groups
-    """
+    FROM {db_root}.groups
+    '''
 
     groups = {}
     db_cursor.execute(groups_query)
@@ -155,17 +134,17 @@ def get_data(db_cursor, db_name):
 
     # Get categories
 
-    categories_query = """
+    categories_query = f'''
     SELECT
     id, name, name_lower, created_at, updated_at, read_restricted, parent_category_id
-    FROM backup.categories
-    """
+    FROM {db_root}.categories
+    '''
 
-    categories_permissions = """
+    categories_permissions = f'''
     SELECT
     id, category_id, group_id, permission_type
-    FROM backup.category_groups
-    """
+    FROM {db_root}.category_groups
+    '''
 
     categories = {}
     db_cursor.execute(categories_query)
@@ -194,11 +173,11 @@ def get_data(db_cursor, db_name):
 
     # Get tags
 
-    tags_query = """
+    tags_query = f'''
     SELECT
     id, name, topic_count, created_at, updated_at
-    FROM backup.tags
-    """
+    FROM {db_root}.tags
+    '''
 
     tags = {}
     db_cursor.execute(tags_query)
@@ -218,23 +197,23 @@ def get_data(db_cursor, db_name):
     # Get topics, permissions, topic tags
     # Private messages are excluded
 
-    topics_query = """
+    topics_query = f'''
     SELECT
     id, title, created_at, updated_at, user_id, category_id
-    FROM backup.topics
-    """
+    FROM {db_root}.topics
+    '''
 
-    allowed_users_query = """
+    allowed_users_query = f'''
     SELECT 
     topic_id, user_id
-    FROM backup.topic_allowed_users
-    """
+    FROM {db_root}.topic_allowed_users
+    '''
 
-    topic_tags_query = """
+    topic_tags_query = f'''
     SELECT
     topic_id, tag_id
-    FROM backup.topic_tags
-    """
+    FROM {db_root}.topic_tags
+    '''
 
     pm_count = 0
     pm_topic_set = set()
@@ -279,30 +258,30 @@ def get_data(db_cursor, db_name):
     # Get posts
     # Private messages are excluded
 
-    posts_query = """
+    posts_query = f'''
     SELECT
     id, user_id, topic_id, post_number, raw, created_at, updated_at, deleted_at, hidden, word_count, wiki, reads, score, like_count, reply_count, quote_count
-    FROM backup.posts
-    """
+    FROM {db_root}.posts
+    '''
 
-    replies_query = """
+    replies_query = f'''
     SELECT
     post_id, reply_post_id
-    FROM backup.post_replies
-    """
+    FROM {db_root}.post_replies
+    '''
 
-    quotes_query = """
+    quotes_query = f'''
     SELECT
     post_id, quoted_post_id
-    FROM backup.quoted_posts
-    """
+    FROM {db_root}.quoted_posts
+    '''
 
-    likes_query = """
+    likes_query = f'''
     SELECT
     post_id, user_id
-    FROM backup.post_actions
+    FROM {db_root}.post_actions
     WHERE post_action_type_id = 2
-    """
+    '''
 
     posts = {}
     pm_post_set = set()
@@ -382,11 +361,11 @@ def get_data(db_cursor, db_name):
 
     # Get annotator languages
 
-    annotator_languages_query = """
+    annotator_languages_query = f'''
     SELECT
     id, name, locale
-    FROM backup.annotator_store_languages
-    """
+    FROM {db_root}.annotator_store_languages
+    '''
 
     annotator_languages = {}
     language_list = ''
@@ -405,17 +384,17 @@ def get_data(db_cursor, db_name):
 
     # Get annotator codes and code names
 
-    annotator_codes_query = """
+    annotator_codes_query = f'''
     SELECT
     id, description, creator_id, created_at, updated_at, ancestry, annotations_count
-    FROM backup.annotator_store_tags
-    """
+    FROM {db_root}.annotator_store_tags
+    '''
 
-    annotator_code_names_query = """
+    annotator_code_names_query = f'''
     SELECT
     id, name, tag_id, language_id, created_at
-    FROM backup.annotator_store_tag_names
-    """
+    FROM {db_root}.annotator_store_tag_names
+    '''
 
     annotator_codes = {}
     db_cursor.execute(annotator_codes_query)
@@ -449,11 +428,11 @@ def get_data(db_cursor, db_name):
 
     # Get annotator annotations and ranges
 
-    annotations_query = """
+    annotations_query = f'''
     SELECT
     id, text, quote, created_at, updated_at, tag_id, post_id, creator_id, type, topic_id
-    FROM backup.annotator_store_annotations
-    """
+    FROM {db_root}.annotator_store_annotations
+    '''
 
     annotations = {}
     db_cursor.execute(annotations_query)
@@ -656,7 +635,7 @@ def reload_data(dbs):
         db_cursor = db_conn.cursor()
 
         # Get data
-        d = get_data(db_cursor, db['name'])
+        d = get_data(db_cursor, db['name'], db['database_root'])
         data[db['name']] = d
         stats = d['stats']
         stats['chunk_sizes'] = {}
@@ -765,15 +744,18 @@ print(' ')
 print('Building Neo4j database...')
 print(' ')
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
-uri = 'bolt://localhost:7687'
-driver = GraphDatabase.driver(uri, auth=('neo4j', 'shen4yaya'))
+uri = config['neo4j_uri']
+driver = GraphDatabase.driver(uri, auth=(config['neo4j_user'], config['neo4j_password']))
 data_path = os.path.abspath('./db/')
 
 def graph_clear():
     # Clear database function
 
     def tx_clear_neo4j(tx):
-        tx.run('MATCH (a) DETACH DELETE a')
+        tx.run(
+            f'CALL db.index.fulltext.drop("cooccurrenceRelationshipIndex") '
+            f'MATCH (a) DETACH DELETE a '
+            )
 
     with driver.session() as session:
         try:
