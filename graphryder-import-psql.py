@@ -41,7 +41,7 @@ databases = [
         'password': ''
     }]
 
-reload_from_database = True
+reload_from_database = False
 
 start_time = time.time()
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
@@ -1405,6 +1405,27 @@ def graph_create_codes(data):
                     print(f'Import for codes on {platform_name}, chunk #{chunk}')
                     print(e)
 
+def graph_create_code_ancestry(data):
+    # Create ancestry relations
+
+    def tx_create_code_ancestry(tx, dataset):
+        tx.run(
+            f'MATCH (c:code) WHERE c.ancestry CONTAINS "/" '
+            f'WITH toInteger(split(c.ancestry,"/")[-1]) AS cid, c AS child '
+            f'MERGE (parent:code {{discourse_id: cid, platform: child.platform}}) '
+            f'MERGE (parent)<-[:HAS_PARENT_CODE]-(child) '
+        )
+
+    for platform in data.values():
+        with driver.session() as session:
+            platform_name = platform['site']['name']
+            try:
+                session.write_transaction(tx_create_code_ancestry, platform_name)
+                print(f'Loaded code ancestry from {platform_name}')
+            except Exception as e:
+                print(f'Import failed for code ancestry on {platform_name}')
+                print(e)
+
 def graph_create_code_names(data):
     # Add annotation code names
 
@@ -1423,6 +1444,13 @@ def graph_create_code_names(data):
             f'WITH codename, language, code '
             f'CREATE (codename)<-[:HAS_CODENAME]-(code) '
             f'CREATE (codename)-[:IN_LANGUAGE]->(language) '
+            f'WITH code, codename, language '
+            f'CALL apoc.do.when(language.locale = "en",'
+            f'"SET code.name = codename.name",'
+            f'"",'
+            f'{{code:code, codename:codename, language:language}}) '
+            f'YIELD value AS value2 '
+            f'RETURN value2 '
         )
 
     for platform in data.values():
@@ -1502,6 +1530,11 @@ def graph_create_corpus():
 def graph_create_code_cooccurrences():
     # Create code cooccurance network between codes
 
+    def tx_create_cooccurrence_index(tx):
+        tx.run(
+            f'CALL db.index.fulltext.createRelationshipIndex("cooccurrenceRelationshipIndex",["COOCCURS"],["count"])'
+        )
+
     def tx_create_code_cooccurrences(tx):
         tx.run(
             f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code1:code)-[:HAS_CODENAME]->(cn1:codename)-[:IN_LANGUAGE]->(l:language {{locale: "en"}}) '
@@ -1512,6 +1545,10 @@ def graph_create_code_cooccurrences():
         )
 
     with driver.session() as session:
+        session.write_transaction(tx_create_cooccurrence_index)
+        print('Created cooccurrence index')
+
+    with driver.session() as session:
         try:
             session.write_transaction(tx_create_code_cooccurrences)
             print('Created cooccurance graph')
@@ -1519,6 +1556,23 @@ def graph_create_code_cooccurrences():
             print('Creating cooccurance graph failed.')
             print(e)
 
+def graph_create_code_use():
+    # Create code use graph
+
+    def tx_create_code_use(tx):
+        tx.run(
+            f'MATCH (user)-[r:CREATED]-(:annotation)-[:REFERS_TO]->(code:code) '
+            f'WITH user, code, count(r) as use '
+            f'MERGE (user)-[:USED_CODE {{count: use}}]->(code) '
+        )
+
+    with driver.session() as session:
+        try:
+            session.write_transaction(tx_create_code_use)
+            print('Created code use graph')
+        except Exception as e:
+            print('Creating code use graph failed.')
+            print(e)
 
 def graph_create_creator_code_cooccurrences():
     pass
@@ -1552,6 +1606,8 @@ graph_create_languages(data)
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_codes(data)
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_code_ancestry(data)
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_code_names(data)
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_annotations(data)
@@ -1560,13 +1616,10 @@ graph_create_corpus()
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 graph_create_code_cooccurrences()
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
+graph_create_code_use()
+print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
 # TODO
-# Add english code name to code node
-# Decide how to define corpus (maybe add property for each corpus and then count?)
-# Add code ancestry
-# Add annotations, code relation (to local name id), annotator id
+# Decide how to define corpus on code (maybe add property for each corpus and then count?)
 # Add code-co-occurance per ethno corpus 
-
-# TODO FUTURE
 # Add post permissions with HAS_ACCESS to groups to enable granular graph access

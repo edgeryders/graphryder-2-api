@@ -44,8 +44,4 @@ WITH code1, code2, cn1, cn2, corpus, count(DISTINCT p) AS cooccurs
 MERGE (code1)-[r:COOCCURS {count: cooccurs}]-(code2)
 RETURN corpus.name, cn1.name, cn2.name, r.count ORDER BY r.count DESCENDING
 
-f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code1:code)-[:HAS_CODENAME]->(cn1:codename)-[:IN_LANGUAGE]->(l:language {{locale: 'en'}}) '
-f'MATCH (corpus:corpus)<-[:TAGGED_WITH]-()<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-()-[:REFERS_TO]->(code2:code)-[:HAS_CODENAME]->(cn2:codename)-[:IN_LANGUAGE]->(l:language {{locale: 'en'}}) WHERE NOT ID(code1) = ID(code2) '
-f'WITH code1, code2, cn1, cn2, corpus, count(DISTINCT p) AS cooccurs '
-f'MERGE (code1)-[r:COOCCURS {{count: cooccurs}}]-(code2) '
-f'RETURN corpus.name, cn1.name, cn2.name, r.count ORDER BY r.count DESCENDING '
+MERGE (code)-[:HAS_PARENT_CODE]->(parent:code {discourse_id: toInteger(split(value.ancestry,"/")[-1]), platform: value.platform})
