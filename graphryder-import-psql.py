@@ -6,14 +6,11 @@ from sys import exit
 from neo4j import GraphDatabase
 from pprint import pprint
 
-
+# Python version 3.8.6
 # For this script to work, neo4j must have APOC installed and the neo4j.conf file 
 # must have the following properties set:
 # apoc.import.file.enabled=true
 # apoc.import.file.use_neo4j_config=false
-
-# TODO: Move the database list to a config file
-# TODO: Trigger reload from database through parameter when running the script
 
 with open("config.json") as json_config:
     config = json.load(json_config)
@@ -753,13 +750,18 @@ def graph_clear():
 
     def tx_clear_neo4j(tx):
         tx.run(
-            f'CALL db.index.fulltext.drop("cooccurrenceRelationshipIndex") '
             f'MATCH (a) DETACH DELETE a '
+            )
+
+    def tx_clear_fullTextIndexes(tx):
+        tx.run(
+            f'CALL db.index.fulltext.drop("cooccurrenceRelationshipIndex") '
             )
 
     with driver.session() as session:
         try:
             session.write_transaction(tx_clear_neo4j)
+            session.write_transaction(tx_clear_fullTextIndexes)
             print('Cleared database')
         except Exception as e:
             print(e)
