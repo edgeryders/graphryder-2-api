@@ -1,6 +1,7 @@
 import psycopg2
 import time
 import json
+import hashlib
 import os
 from sys import exit
 from neo4j import GraphDatabase
@@ -16,12 +17,11 @@ with open("config.json") as json_config:
     config = json.load(json_config)
 
 databases = config['databases']
-reload_from_database = config['reload_from_database']
 
 start_time = time.time()
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
-def get_data(db_cursor, db_name, db_root):
+def get_data(db_cursor, db_name, db_root, salt):
     # This function gets the data we need from the Discourse psql database.
     # It assumes that the database is built from backup dumps. 
     # If running on the live database, 'backup' in the database names should be changed.
@@ -72,12 +72,26 @@ def get_data(db_cursor, db_name, db_root):
     users = {}
     db_cursor.execute(users_query)
     users_data = db_cursor.fetchall()
+    # If emails are redacted, we use a salted hash to link user accounts together
+    # Since we need the same email to return the same hash, we use one salt for all platforms and users. 
+    if config['redact_emails']:
+        print(f'    Redacting emails and replacing with hashes...')
     for user in users_data:
         uid = user[0]
+        email = user[2]
+        hashed_email = hashlib.pbkdf2_hmac(
+            'sha256',
+            email.encode('utf-8'),
+            salt,
+            1000,
+            dklen=128
+        )
+        if config['redact_emails']:
+            email = hashed_email
         users[uid] = {
             'id': uid,
             'username': user[1],
-            'email': user[2],
+            'email': email,
             'groups': [],
             'consent': 0,
             'consent_updated': 0
@@ -618,6 +632,8 @@ def reload_data(dbs):
         print ("Successfully created the directory %s " % db_path)
 
     data = {}
+    # Salt for hashing redacted data that is needed for matching, like user emails.    
+    salt = os.urandom(32)
     for db in dbs:
 
         db_conn = psycopg2.connect(
@@ -632,7 +648,7 @@ def reload_data(dbs):
         db_cursor = db_conn.cursor()
 
         # Get data
-        d = get_data(db_cursor, db['name'], db['database_root'])
+        d = get_data(db_cursor, db['name'], db['database_root'], salt)
         data[db['name']] = d
         stats = d['stats']
         stats['chunk_sizes'] = {}
@@ -727,7 +743,7 @@ def load_data(dbs):
 # Load data from Discourse psql databases and dump to json files
 # Data is loaded from JSON files because Neo4j APOC functions are optimized for this.
 dbs = databases[:]
-if reload_from_database:
+if config['reload_from_database']:
     reload_data(dbs)
 data = load_data(dbs)
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
