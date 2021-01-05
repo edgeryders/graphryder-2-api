@@ -15,5 +15,10 @@ node_modules/
 *.DS_Store
 
 # API
+npm-debug.log
 .env
 api/node_modules
+
+# Import 
+import/db/
+import/config.json
