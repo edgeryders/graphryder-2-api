@@ -13,3 +13,7 @@ node_modules/
 # Misc
 *.log
 *.DS_Store
+
+# API
+.env
+api/node_modules
