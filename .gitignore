@@ -1,3 +1,15 @@
-.DS_Store
-db/
-config.json
+# IDE and text editor artifacts
+*.sublime-workspace
+.idea
+*~
+*.bak
+*.swp
+.vscode/
+
+# Dependencies
+/yarn.lock
+node_modules/
+
+# Misc
+*.log
+*.DS_Store
