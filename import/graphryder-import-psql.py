@@ -1113,6 +1113,7 @@ def graph_create_posts(data):
             f'MATCH (t:topic {{platform: "{dataset}", discourse_id: value.topic_id}}) '
             f'WITH p, t '
             f'MERGE (t)<-[r:IN_TOPIC]-(p)'
+            f'SET p.topic_title = t.title '
         )
 
     def tx_create_post_index(tx):
