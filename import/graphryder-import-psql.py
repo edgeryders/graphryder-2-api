@@ -1493,6 +1493,7 @@ def graph_create_annotations(data):
             f'CREATE (code)<-[:REFERS_TO]-(annotation) '
             f'CREATE (post)<-[:ANNOTATES]-(annotation) '
             f'CREATE (user)-[:CREATED]->(annotation) '
+            f'SET annotation.creator_username = user.username '
         )
 
     for platform in data.values():
