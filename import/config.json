@@ -1,5 +1,5 @@
 {
-    "reload_from_database": true,
+    "reload_from_database": false,
     "redact_emails": true,
     "neo4j_uri": "bolt://localhost:7687",
     "neo4j_user": "neo4j",

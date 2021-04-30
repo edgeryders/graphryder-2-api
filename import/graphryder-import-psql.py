@@ -1508,6 +1508,7 @@ def graph_create_annotations(data):
 
 def graph_create_corpus():
     # Define ethno-tags as corpus identifiers
+    # This function expects corpus identifiers to be unique across platforms
 
     def tx_create_corpus(tx):
         tx.run(
@@ -1519,12 +1520,40 @@ def graph_create_corpus():
             f'MERGE (code)-[:IN_CORPUS]->(t)'
         )
 
+    def tx_get_corpora(tx):
+        result = tx.run('MATCH (c:corpus) RETURN c.name AS name')
+        corpora = []
+        for corpus in result:
+            corpora.append(corpus['name'])
+        return corpora
+
+    def tx_create_corpus_annotation_counts(tx, corpus):
+        annotations_variable_prop = corpus.replace('-','_')
+        tx.run(
+            f'MATCH (corpus:corpus {{name: "{corpus}"}})<-[:TAGGED_WITH]-(t:topic)<-[:IN_TOPIC]-(p:post)<-[:ANNOTATES]-(a:annotation)-[:REFERS_TO]->(code:code) '
+            f'WITH code, corpus, count(a) AS corpus_code_use '
+            f'MATCH (code)-[r:IN_CORPUS]->(corpus) '
+            f'SET r.annotation_count = corpus_code_use '
+        )
+
     with driver.session() as session:
         try:
             session.write_transaction(tx_create_corpus)
             print('Added corpus labels to graph')
         except Exception as e:
             print('Adding corpus labels to graph failed.')
+            print(e)
+
+    corpora = []
+    with driver.session() as session:
+        try:
+            corpora = session.read_transaction(tx_get_corpora)
+            if corpora:
+                for corpus in corpora:
+                    session.write_transaction(tx_create_corpus_annotation_counts, corpus)
+                print('Created annotation counts per corpus')
+        except Exception as e:
+            print('Getting corpora failed.')
             print(e)
 
 def graph_create_code_cooccurrences():
@@ -1620,6 +1649,4 @@ graph_create_code_use()
 print("--- %s seconds ---" % (round(time.time() - start_time,2)))
 
 # TODO
-# Decide how to define corpus on code (maybe add property for each corpus and then count?)
-# Add code-co-occurance per ethno corpus 
 # Add post permissions with HAS_ACCESS to groups to enable granular graph access
