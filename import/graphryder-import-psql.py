@@ -1109,11 +1109,12 @@ def graph_create_posts(data):
             f'WITH p, value '
             f'MATCH (u:user {{discourse_id: value.user_id, platform: "{dataset}"}}) '
             f'MERGE (p)<-[:CREATED]-(u) '
-            f'WITH p, value '
+            f'WITH p, u, value '
             f'MATCH (t:topic {{platform: "{dataset}", discourse_id: value.topic_id}}) '
+            f'SET p.username = u.username '
             f'WITH p, t '
-            f'MERGE (t)<-[r:IN_TOPIC]-(p)'
             f'SET p.topic_title = t.title '
+            f'MERGE (t)<-[r:IN_TOPIC]-(p)'
         )
 
     def tx_create_post_index(tx):
